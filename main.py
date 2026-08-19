@@ -3,6 +3,8 @@ import httpx
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 
 # ---------------------------------------------------------------------------
 # Endpoints & constants
@@ -147,7 +149,12 @@ async def process_trial(request):
             "message": "30 Days Trial Not Detected. Please provide a new nfvdid."
         })
 
+# Dito natin in-add ang CORS rules para payagan ang mga requests mula kahit saang website (gaya ng iyong test.html)
+middleware = [
+    Middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
+]
+
 app = Starlette(debug=True, routes=[
     Route('/', home, methods=['GET']),
     Route('/process-trial', process_trial, methods=['POST']),
-])
+], middleware=middleware)
