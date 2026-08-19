@@ -170,22 +170,37 @@ class TrialSender:
         self.top_uuid = str(uuid.uuid4())
         self._headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
             "Content-Type": "application/json",
             "Origin": "https://www.netflix.com",
             "Referer": "https://www.netflix.com/",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": "en-MM,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
             "x-netflix.request.id": self.req_id,
+            "x-netflix.request.client.context": "{\"appstate\":\"foreground\"}",
+            "x-netflix.request.originating.url": "https://www.netflix.com/in/",
             "x-netflix.request.toplevel.uuid": self.top_uuid,
             "x-netflix.request.clcs.bucket": "high",
+            "x-netflix.context.is-inapp-browser": "false",
             "x-netflix.context.form-factor": "phone",
+            "x-netflix.context.operation-name": "CLCSWebInitSignup",
             "x-netflix.context.app-version": "v38c5b0da",
             "x-netflix.context.locales": "en-in",
+            "x-netflix.context.ui-flavor": "akira",
+            "x-netflix.request.attempt": "1",
         }
 
     # -- headers ------------------------------------------------------------
     def cookie_header(self) -> str:
-        """Build the cookie header from known values (nfvdid + flwssn)."""
-        return f"nfvdid={self.nfvdid}; flwssn={self.flwssn}"
+        """Build the cookie header (flwssn + nfvdid + consent/session cookies)."""
+        return (
+            f"flwssn={self.flwssn}; "
+            f"nfvdid={self.nfvdid}; "
+            "OptanonConsent=isGpcEnabled=0&datestamp=Sat+Jul+18+2026+16%3A04%3A50+GMT%2B0800+(Philippine+Standard+Time)&version=202604.2.0&browserGpcFlag=0&isDntEnabled=0&isIABGlobal=false&hosts=&consentId=8a7bcf7d-30ff-4942-aba3-d23de3392a0f&interactionCount=1&isAnonUser=1&prevHadToken=0&landingPath=https%3A%2F%2Fwww.netflix.com%2Fph-en%2F&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&crTime=1784361877493; "
+            "OTSessionTracking=87b6a5c0-0104-4e96-a291-092c11350111; "
+            "netflix-sans-normal-3-loaded=true; "
+            "netflix-sans-bold-3-loaded=true"
+        )
 
     def _headers_with_cookie(self) -> dict:
         headers = self._headers.copy()
