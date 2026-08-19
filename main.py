@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import sys
@@ -93,15 +94,45 @@ def _extract_error(text: str) -> str:
     return m.group(1) if m else text[:300]
 
 
+def _extract_session_data(text: str):
+    """Kunin ang session-specific serverState + Send Link action token mula sa INIT response."""
+    def crawl(node, found):
+        if isinstance(node, dict):
+            if node.get("testId") == "email-register-send-link-send-link-button":
+                found.append(node)
+            for v in node.values():
+                crawl(v, found)
+        elif isinstance(node, list):
+            for item in node:
+                crawl(item, found)
+
+    try:
+        screen = json.loads(text)["data"]["clcsWebInitSignup"]["screen"]
+    except Exception:  # noqa: BLE001
+        return None, None
+
+    server_state = screen.get("serverState")
+    found = []
+    crawl(screen, found)
+    send_token = None
+    if found:
+        for n in (found[0].get("onPress") or {}).get("nodes", []):
+            if n.get("__typename") == "CLCSRequestScreenUpdate" and n.get("serverScreenUpdate"):
+                send_token = n["serverScreenUpdate"]
+                break
+    return server_state, send_token
+
+
 class TrialSender:
     """Banner check + CLCS GraphQL signup flow (same payloads as the original)."""
 
-    def __init__(self, email: str, nfvdid: str = None):
+    def __init__(self, email: str, nfvdid: str = None, recaptcha_token: str = None):
         self.email = email
         self.locale = "en-IN"
         # Kapag walang ibinigay na custom nfvdid, gamitin ang default.
         # Hindi na ito hinaharangan: kahit hindi ma-detect, magpapatuloy ang signup.
         self.nfvdid = nfvdid or DEFAULT_NFVDID
+        self.recaptcha_token = recaptcha_token
         self.flwssn = str(uuid.uuid4())
         self.req_id = str(uuid.uuid4())
         self.top_uuid = str(uuid.uuid4())
@@ -187,11 +218,15 @@ class TrialSender:
 
     # -- GraphQL signup -------------------------------------------------------
     async def send_signup(self):
-        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns (bool, message, debug)."""
+        """Run INIT, kunin ang session token, tapos i-submit ang Send Link action.
+
+        Returns (bool, message, debug).
+        """
         debug = {}
         headers = self._headers_with_cookie()
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=45) as client:
+            # 1) INIT: kumuha ng sariwang session + Send Link button token
             try:
                 resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
             except Exception as exc:
@@ -204,8 +239,50 @@ class TrialSender:
             debug["init_screen"] = _describe_screen(resp1.text)
             debug["init_error_msg"] = _extract_error(resp1.text)
 
+            server_state, send_token = _extract_session_data(resp1.text)
+            debug["session_server_state_found"] = bool(server_state)
+            debug["send_link_token_found"] = bool(send_token)
+
+            if not (server_state and send_token):
+                msg = "Hindi makuha ang Send Link action sa kasalukuyang session (baka may bagong hakbang/reCAPTCHA ang page)."
+                err(msg)
+                return False, msg, debug
+
+            # 2) I-submit ang Send Link action gamit ang CURRENT session data
+            input_fields = [
+                {"name": "email", "value": {"stringValue": self.email}},
+            ]
+            if self.recaptcha_token:
+                input_fields.append(
+                    {"name": "recaptchaToken", "value": {"stringValue": self.recaptcha_token}}
+                )
+                input_fields.append(
+                    {"name": "recaptchaError", "value": {"stringValue": ""}}
+                )
+            else:
+                input_fields.append({"name": "recaptchaToken", "value": {}})
+                input_fields.append(
+                    {"name": "recaptchaError", "value": {"stringValue": "LOAD_TIMED_OUT"}}
+                )
+            input_fields.append(
+                {"name": "recaptchaSiteKey", "value": {"stringValue": RECAPTCHA_SITE_KEY}}
+            )
+
+            payload = {
+                "operationName": "CLCSScreenUpdate",
+                "variables": {
+                    "format": "HTML",
+                    "imageFormat": "PNG",
+                    "locale": self.locale,
+                    "serverState": server_state,
+                    "serverScreenUpdate": send_token,
+                    "inputFields": input_fields,
+                },
+                "extensions": {"persistedQuery": {"id": UPDATE_QUERY_ID, "version": 102}},
+            }
+
             try:
-                resp2 = await client.post(GRAPHQL_URL, json=self.payload_update(), headers=headers)
+                resp2 = await client.post(GRAPHQL_URL, json=payload, headers=headers)
             except Exception as exc:
                 msg = f"Update request error: {type(exc).__name__}: {exc}"
                 err(msg)
@@ -216,23 +293,20 @@ class TrialSender:
             debug["update_screen"] = _describe_screen(resp2.text)
             debug["update_error_msg"] = _extract_error(resp2.text)
 
-            ok_init = '"errors"' not in resp1.text.lower()
-            ok_update = resp2.status_code == 200 and '"errors"' not in resp2.text.lower()
-
-            if ok_init and ok_update:
+            if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
                 msg = f"Trial activated for {self.email}"
                 ok(msg)
                 return True, msg, debug
-            msg = f"Signup did not complete (init_ok={ok_init}, update_ok={ok_update})."
-            err(msg)
-            return False, msg, debug
+
+            err("Signup did not complete. Tingnan ang debug para sa dahilan.")
+            return False, "Signup did not complete — tingnan ang debug.", debug
 
 
 # ---------------------------------------------------------------------------
 # Starlette App (ito ang gagamitin ng Wasmer deployment)
 # ---------------------------------------------------------------------------
 async def home(request):
-    return JSONResponse({"message": "APIsa is running. Send a POST request to /process-trial"})
+    return JSONResponse({"message": "API is running. Send a POST request to /process-trial"})
 
 
 async def process_trial(request):
@@ -246,8 +320,9 @@ async def process_trial(request):
         return JSONResponse({"status": "failed", "message": "Invalid email address."}, status_code=400)
 
     nfvdid = (data.get("nfvdid") or "").strip() or None
+    recaptcha_token = (data.get("recaptchaToken") or data.get("recaptcha_token") or "").strip() or None
 
-    sender = TrialSender(email=email, nfvdid=nfvdid)
+    sender = TrialSender(email=email, nfvdid=nfvdid, recaptcha_token=recaptcha_token)
 
     # Hindi na hinihingi ang bagong nfvdid at hindi na hinaharangan:
     # kahit hindi ma-detect ang DEFAULT_NFVDID/trial banner, diretsong mag-send ng signup.
