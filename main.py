@@ -134,20 +134,13 @@ async def process_trial(request):
     nfvdid = data.get("nfvdid", DEFAULT_NFVDID)
     
     sender = TrialSender(email=email, nfvdid=nfvdid)
-    banner = await sender.check_banner()
-
-    if banner and "30" in banner.lower():
-        success, message = await sender.send_signup()
-        if success:
-            return JSONResponse({"status": "success", "email": email, "message": message})
-        else:
-            return JSONResponse({"status": "failed", "email": email, "message": message})
+    # Diretso na ang signup — hindi na kailangang ma-detect ang trial banner
+    # o ang DEFAULT_NFVDID bago magpatuloy.
+    success, message = await sender.send_signup()
+    if success:
+        return JSONResponse({"status": "success", "email": email, "message": message})
     else:
-        return JSONResponse({
-            "status": "failed", 
-            "email": email, 
-            "message": "30 Days Trial Not Detected. Please provide a new nfvdid."
-        })
+        return JSONResponse({"status": "failed", "email": email, "message": message})
 
 # Dito natin in-add ang CORS rules para payagan ang mga requests mula kahit saang website (gaya ng iyong test.html)
 middleware = [
