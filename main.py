@@ -123,6 +123,38 @@ def _extract_session_data(text: str):
     return server_state, send_token
 
 
+def _extract_screen_details(text: str) -> dict:
+    """Kunin ang mga detalye ng screen mula sa isang Netflix response (para sa debug)."""
+    details = {}
+    details["test_ids"] = sorted(set(re.findall(r'"testId":"([^"]+)"', text)))
+
+    vals = []
+    for m in re.finditer(r'"value":"([^"]{2,120})"', text):
+        v = m.group(1)
+        if v.startswith("http") or v.startswith("Step"):
+            continue
+        if v not in vals:
+            vals.append(v)
+    details["texts"] = vals[:15]
+
+    m = re.search(r'"status":"([^"]+)"', text)
+    if m:
+        details["status"] = m.group(1)
+    m = re.search(r'"location":"([^"]+)"', text)
+    if m:
+        details["location"] = m.group(1)
+    m = re.search(r'"screenName":"([^"]+)"', text)
+    if m:
+        details["screen_name"] = m.group(1)
+    m = re.search(r'"serverState":"([^"]+)"', text)
+    if m:
+        details["server_state_length"] = len(m.group(1))
+    m = re.search(r'"clcsSessionId":"([^"]+)"', text)
+    if m:
+        details["session_id"] = m.group(1)
+    return details
+
+
 class TrialSender:
     """Banner check + CLCS GraphQL signup flow (same payloads as the original)."""
 
@@ -238,6 +270,7 @@ class TrialSender:
             debug["init_has_errors"] = '"errors"' in resp1.text.lower()
             debug["init_screen"] = _describe_screen(resp1.text)
             debug["init_error_msg"] = _extract_error(resp1.text)
+            debug["init_details"] = _extract_screen_details(resp1.text)
 
             server_state, send_token = _extract_session_data(resp1.text)
             debug["session_server_state_found"] = bool(server_state)
@@ -292,6 +325,7 @@ class TrialSender:
             debug["update_has_errors"] = '"errors"' in resp2.text.lower()
             debug["update_screen"] = _describe_screen(resp2.text)
             debug["update_error_msg"] = _extract_error(resp2.text)
+            debug["update_details"] = _extract_screen_details(resp2.text)
 
             if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
                 msg = f"Trial activated for {self.email}"
