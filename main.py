@@ -1,4 +1,5 @@
 
+
 import asyncio
 import os
 import sys
@@ -62,7 +63,7 @@ BANNER = (
 # Endpoints & constants
 # ---------------------------------------------------------------------------
 GRAPHQL_URL = "https://web.prod.cloud.netflix.com/graphql"
-LANDING_URL = "https://www.netflix.com/ph-en/"
+LANDING_URL = "https://www.netflix.com/in/"
 
 RECAPTCHA_SITE_KEY = "6LdqW_EqAAAAAO87Fb_kcZfNzs0IqJRcKiJDYpUv"
 INIT_QUERY_ID = "5d76d6a0-ccfe-4c31-b587-b4e1954732ca"
@@ -86,24 +87,16 @@ class TrialSender:
         self.top_uuid = str(uuid.uuid4())
         self._headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-            "Connection": "Keep-Alive",
-            "Accept-Encoding": "gzip",
             "Content-Type": "application/json",
             "Origin": "https://www.netflix.com",
             "Referer": "https://www.netflix.com/",
-            "Accept-Language": "en-MM,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
             "x-netflix.request.id": self.req_id,
-            "x-netflix.request.client.context": "{\"appstate\":\"foreground\"}",
-            "x-netflix.request.originating.url": "https://www.netflix.com/in/",
             "x-netflix.request.toplevel.uuid": self.top_uuid,
             "x-netflix.request.clcs.bucket": "high",
-            "x-netflix.context.is-inapp-browser": "false",
             "x-netflix.context.form-factor": "phone",
-            "x-netflix.context.operation-name": "CLCSWebInitSignup",
             "x-netflix.context.app-version": "v38c5b0da",
             "x-netflix.context.locales": "en-in",
-            "x-netflix.context.ui-flavor": "akira",
-            "x-netflix.request.attempt": "1",
         }
 
     # -- headers ------------------------------------------------------------
@@ -123,7 +116,7 @@ class TrialSender:
             "operationName": "CLCSWebInitSignup",
             "variables": {
                 "inputNode": "WELCOME",
-                "locale": self.locale,
+                "locale": "en-IN",
                 "inputFields": [
                     {"name": "flwssn", "value": {"stringValue": self.flwssn}},
                     {"name": "email", "value": {"stringValue": self.email}},
@@ -143,7 +136,7 @@ class TrialSender:
             "variables": {
                 "format": "HTML",
                 "imageFormat": "PNG",
-                "locale": self.locale,
+                "locale": "en-IN",
                 "serverState": "Bgjru+vcAxLTAf/qOOEwXPLVxW+7Jod9WpjYuKN8j1qfhQpzCK4mmQts5eMSeaP+l7s6NKcNBO4rmYabFFCVnMpCH3ib4AicvXAKm30Z+s5W3Cst0D0BK5x/pwn3QmByi/OgGwU/fzaiR5oxSlZe4fKVexWHISkE4GMzJqLaaXQR0M73ynZB9idNBfqsz3RA5WJN+DGAbVUOZlWl8eZqffvQpp/5MGubeQFpdwKqkAx1nHh7/xI1i9tDU0KLgrvkZrbe6nQ1MX2nc9TBxqnVVxtc3ptHdqydP1wlIu0YBiIOCgydgLg1SvK6tSPOff8=",
                 "serverScreenUpdate": "Bgjru+vcAxKSAjDnHOxlaIbFSbwaWzZo/REHFnNG7OtpcXdKTDlcL4/o+huGi/fNW+jrqNDqDSsv1iytiG/ZtvO9ierUE9M1Kc/yEj9JsSiG3XpPciFDzPd6psSaG68XLbos+Qie0wniXCtJyWDLDuLd9ayCMB8qGCxwbov6B41kCQY/zArwlecm0GNoJdd5jvZfBJVtytD6mMCYnPA/9zhX4okj+6IGet9xOCYt76IDiuyESxgKbaOLcd6DQIDSBf4m/lYi2Tasj7olPkCaDIXxjU+0UY+b7eDyhvi2if2vt6510ARrGsSZq8DaazQmrpAbfiCW47s1/1mR59vUMYeT8VCqqAvbNwipqyP1DQMHtoTnCoWns0+x6IgYBiIOCgx9EW4i3i9SUswnHEg=",
                 "inputFields": [
@@ -175,8 +168,6 @@ class TrialSender:
     # -- GraphQL signup -------------------------------------------------------
     async def send_signup(self):
         """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns (bool, message, debug)."""
-        import json
-
         debug = {}
         headers = self._headers_with_cookie()
         async with httpx.AsyncClient(timeout=30) as client:
@@ -261,3 +252,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
