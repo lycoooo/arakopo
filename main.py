@@ -1,7 +1,6 @@
+
 import asyncio
-import json
 import os
-import re
 import sys
 import uuid
 
@@ -75,96 +74,13 @@ DEFAULT_NFVDID = (
 )
 
 
-def _describe_screen(text: str) -> str:
-    """Ano ang screen na ibinalik ng Netflix (para sa debugging)."""
-    if "email-register-send-link" in text:
-        return "SEND_LINK_FORM (kailangan pa i-click ang 'Send Link' button bago magpadala ng email)"
-    if "email-register-link-sent" in text:
-        return "LINK_SENT ('Check your inbox' screen - ini-render lang, hindi tiyak kung na-send ang email)"
-    if '"errors"' in text.lower():
-        return "ERROR_RESPONSE"
-    return "UNKNOWN"
-
-
-def _extract_error(text: str) -> str:
-    """Kunin ang unang GraphQL error message (kung mayroon)."""
-    if '"errors"' not in text.lower():
-        return ""
-    m = re.search(r'"message"\s*:\s*"([^"]*)"', text)
-    return m.group(1) if m else text[:300]
-
-
-def _extract_session_data(text: str):
-    """Kunin ang session-specific serverState + Send Link action token mula sa INIT response."""
-    def crawl(node, found):
-        if isinstance(node, dict):
-            if node.get("testId") == "email-register-send-link-send-link-button":
-                found.append(node)
-            for v in node.values():
-                crawl(v, found)
-        elif isinstance(node, list):
-            for item in node:
-                crawl(item, found)
-
-    try:
-        screen = json.loads(text)["data"]["clcsWebInitSignup"]["screen"]
-    except Exception:  # noqa: BLE001
-        return None, None
-
-    server_state = screen.get("serverState")
-    found = []
-    crawl(screen, found)
-    send_token = None
-    if found:
-        for n in (found[0].get("onPress") or {}).get("nodes", []):
-            if n.get("__typename") == "CLCSRequestScreenUpdate" and n.get("serverScreenUpdate"):
-                send_token = n["serverScreenUpdate"]
-                break
-    return server_state, send_token
-
-
-def _extract_screen_details(text: str) -> dict:
-    """Kunin ang mga detalye ng screen mula sa isang Netflix response (para sa debug)."""
-    details = {}
-    details["test_ids"] = sorted(set(re.findall(r'"testId":"([^"]+)"', text)))
-
-    vals = []
-    for m in re.finditer(r'"value":"([^"]{2,120})"', text):
-        v = m.group(1)
-        if v.startswith("http") or v.startswith("Step"):
-            continue
-        if v not in vals:
-            vals.append(v)
-    details["texts"] = vals[:15]
-
-    m = re.search(r'"status":"([^"]+)"', text)
-    if m:
-        details["status"] = m.group(1)
-    m = re.search(r'"location":"([^"]+)"', text)
-    if m:
-        details["location"] = m.group(1)
-    m = re.search(r'"screenName":"([^"]+)"', text)
-    if m:
-        details["screen_name"] = m.group(1)
-    m = re.search(r'"serverState":"([^"]+)"', text)
-    if m:
-        details["server_state_length"] = len(m.group(1))
-    m = re.search(r'"clcsSessionId":"([^"]+)"', text)
-    if m:
-        details["session_id"] = m.group(1)
-    return details
-
-
 class TrialSender:
     """Banner check + CLCS GraphQL signup flow (same payloads as the original)."""
 
-    def __init__(self, email: str, nfvdid: str = None, recaptcha_token: str = None):
+    def __init__(self, email: str):
         self.email = email
         self.locale = "en-IN"
-        # Kapag walang ibinigay na custom nfvdid, gamitin ang default.
-        # Hindi na ito hinaharangan: kahit hindi ma-detect, magpapatuloy ang signup.
-        self.nfvdid = nfvdid or DEFAULT_NFVDID
-        self.recaptcha_token = recaptcha_token
+        self.nfvdid = DEFAULT_NFVDID
         self.flwssn = str(uuid.uuid4())
         self.req_id = str(uuid.uuid4())
         self.top_uuid = str(uuid.uuid4())
@@ -192,15 +108,8 @@ class TrialSender:
 
     # -- headers ------------------------------------------------------------
     def cookie_header(self) -> str:
-        """Build the cookie header (flwssn + nfvdid + consent/session cookies)."""
-        return (
-            f"flwssn={self.flwssn}; "
-            f"nfvdid={self.nfvdid}; "
-            "OptanonConsent=isGpcEnabled=0&datestamp=Sat+Jul+18+2026+16%3A04%3A50+GMT%2B0800+(Philippine+Standard+Time)&version=202604.2.0&browserGpcFlag=0&isDntEnabled=0&isIABGlobal=false&hosts=&consentId=8a7bcf7d-30ff-4942-aba3-d23de3392a0f&interactionCount=1&isAnonUser=1&prevHadToken=0&landingPath=https%3A%2F%2Fwww.netflix.com%2Fph-en%2F&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&crTime=1784361877493; "
-            "OTSessionTracking=87b6a5c0-0104-4e96-a291-092c11350111; "
-            "netflix-sans-normal-3-loaded=true; "
-            "netflix-sans-bold-3-loaded=true"
-        )
+        """Build the cookie header from known values (nfvdid + flwssn)."""
+        return f"nfvdid={self.nfvdid}; flwssn={self.flwssn}"
 
     def _headers_with_cookie(self) -> dict:
         headers = self._headers.copy()
@@ -265,90 +174,30 @@ class TrialSender:
 
     # -- GraphQL signup -------------------------------------------------------
     async def send_signup(self):
-        """Run INIT, kunin ang session token, tapos i-submit ang Send Link action.
+        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns (bool, message, debug)."""
+        import json
 
-        Returns (bool, message, debug).
-        """
         debug = {}
         headers = self._headers_with_cookie()
-
-        async with httpx.AsyncClient(timeout=45) as client:
-            # 1) INIT: kumuha ng sariwang session + Send Link button token
-            try:
-                resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
-            except Exception as exc:
-                msg = f"Init request error: {type(exc).__name__}: {exc}"
-                err(msg)
-                return False, msg, {"error": msg}
-
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
             debug["init_http"] = resp1.status_code
             debug["init_has_errors"] = '"errors"' in resp1.text.lower()
-            debug["init_screen"] = _describe_screen(resp1.text)
-            debug["init_error_msg"] = _extract_error(resp1.text)
-            debug["init_details"] = _extract_screen_details(resp1.text)
-
-            server_state, send_token = _extract_session_data(resp1.text)
-            debug["session_server_state_found"] = bool(server_state)
-            debug["send_link_token_found"] = bool(send_token)
-
-            if not (server_state and send_token):
-                msg = "Hindi makuha ang Send Link action sa kasalukuyang session (baka may bagong hakbang/reCAPTCHA ang page)."
+            if '"errors"' in resp1.text.lower():
+                msg = f"Signup rejected (HTTP {resp1.status_code})."
                 err(msg)
                 return False, msg, debug
 
-            # 2) I-submit ang Send Link action gamit ang CURRENT session data
-            input_fields = [
-                {"name": "email", "value": {"stringValue": self.email}},
-            ]
-            if self.recaptcha_token:
-                input_fields.append(
-                    {"name": "recaptchaToken", "value": {"stringValue": self.recaptcha_token}}
-                )
-                input_fields.append(
-                    {"name": "recaptchaError", "value": {"stringValue": ""}}
-                )
-            else:
-                input_fields.append({"name": "recaptchaToken", "value": {}})
-                input_fields.append(
-                    {"name": "recaptchaError", "value": {"stringValue": "LOAD_TIMED_OUT"}}
-                )
-            input_fields.append(
-                {"name": "recaptchaSiteKey", "value": {"stringValue": RECAPTCHA_SITE_KEY}}
-            )
-
-            payload = {
-                "operationName": "CLCSScreenUpdate",
-                "variables": {
-                    "format": "HTML",
-                    "imageFormat": "PNG",
-                    "locale": self.locale,
-                    "serverState": server_state,
-                    "serverScreenUpdate": send_token,
-                    "inputFields": input_fields,
-                },
-                "extensions": {"persistedQuery": {"id": UPDATE_QUERY_ID, "version": 102}},
-            }
-
-            try:
-                resp2 = await client.post(GRAPHQL_URL, json=payload, headers=headers)
-            except Exception as exc:
-                msg = f"Update request error: {type(exc).__name__}: {exc}"
-                err(msg)
-                return False, msg, {**debug, "error": msg}
-
+            resp2 = await client.post(GRAPHQL_URL, json=self.payload_update(), headers=headers)
             debug["update_http"] = resp2.status_code
             debug["update_has_errors"] = '"errors"' in resp2.text.lower()
-            debug["update_screen"] = _describe_screen(resp2.text)
-            debug["update_error_msg"] = _extract_error(resp2.text)
-            debug["update_details"] = _extract_screen_details(resp2.text)
-
             if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
                 msg = f"Trial activated for {self.email}"
                 ok(msg)
                 return True, msg, debug
-
-            err("Signup did not complete. Tingnan ang debug para sa dahilan.")
-            return False, "Signup did not complete — tingnan ang debug.", debug
+            msg = f"Signup failed (HTTP {resp2.status_code})."
+            err(msg)
+            return False, msg, debug
 
 
 # ---------------------------------------------------------------------------
@@ -368,13 +217,7 @@ async def process_trial(request):
     if not email or "@" not in email:
         return JSONResponse({"status": "failed", "message": "Invalid email address."}, status_code=400)
 
-    nfvdid = (data.get("nfvdid") or "").strip() or None
-    recaptcha_token = (data.get("recaptchaToken") or data.get("recaptcha_token") or "").strip() or None
-
-    sender = TrialSender(email=email, nfvdid=nfvdid, recaptcha_token=recaptcha_token)
-
-    # Hindi na hinihingi ang bagong nfvdid at hindi na hinaharangan:
-    # kahit hindi ma-detect ang DEFAULT_NFVDID/trial banner, diretsong mag-send ng signup.
+    sender = TrialSender(email)
     success, message, debug = await sender.send_signup()
     return JSONResponse({
         "status": "success" if success else "failed",
@@ -384,7 +227,6 @@ async def process_trial(request):
     })
 
 
-# CORS rules para payagan ang mga requests mula kahit saang website (gaya ng index.html)
 middleware = [
     Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 ]
@@ -395,10 +237,7 @@ app = Starlette(debug=True, routes=[
 ], middleware=middleware)
 
 
-# ---------------------------------------------------------------------------
-# CLI mode (opsyonal - kapag manual na "python net.py")
-# ---------------------------------------------------------------------------
-async def _run_cli():
+async def main():
     print(BANNER)
     print()
 
@@ -421,4 +260,4 @@ async def _run_cli():
 
 
 if __name__ == "__main__":
-    asyncio.run(_run_cli())
+    asyncio.run(main())
