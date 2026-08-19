@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import sys
 import uuid
 
@@ -71,6 +72,25 @@ DEFAULT_NFVDID = (
     "BQFmAAEBEHd71oHfkM7FU_oofLECV31AjKJNl9T0lBwR96xzXmWutUqrRdHCkAN1hcHjRlxLI8Eay"
     "T3bVFbyZDu8hLHeBXCz1dcwGebHrzm-7Ty5ckJTvQ%3D%3D"
 )
+
+
+def _describe_screen(text: str) -> str:
+    """Ano ang screen na ibinalik ng Netflix (para sa debugging)."""
+    if "email-register-send-link" in text:
+        return "SEND_LINK_FORM (kailangan pa i-click ang 'Send Link' button bago magpadala ng email)"
+    if "email-register-link-sent" in text:
+        return "LINK_SENT ('Check your inbox' screen - ini-render lang, hindi tiyak kung na-send ang email)"
+    if '"errors"' in text.lower():
+        return "ERROR_RESPONSE"
+    return "UNKNOWN"
+
+
+def _extract_error(text: str) -> str:
+    """Kunin ang unang GraphQL error message (kung mayroon)."""
+    if '"errors"' not in text.lower():
+        return ""
+    m = re.search(r'"message"\s*:\s*"([^"]*)"', text)
+    return m.group(1) if m else text[:300]
 
 
 class TrialSender:
@@ -167,30 +187,52 @@ class TrialSender:
 
     # -- GraphQL signup -------------------------------------------------------
     async def send_signup(self):
-        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns (bool, message)."""
+        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns (bool, message, debug)."""
+        debug = {}
         headers = self._headers_with_cookie()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
-            if '"errors"' in resp1.text.lower():
-                msg = f"Signup rejected (HTTP {resp1.status_code}). " + resp1.text[:300]
-                err(msg)
-                return False, msg
 
-            resp2 = await client.post(GRAPHQL_URL, json=self.payload_update(), headers=headers)
-            if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
+        async with httpx.AsyncClient(timeout=30) as client:
+            try:
+                resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
+            except Exception as exc:
+                msg = f"Init request error: {type(exc).__name__}: {exc}"
+                err(msg)
+                return False, msg, {"error": msg}
+
+            debug["init_http"] = resp1.status_code
+            debug["init_has_errors"] = '"errors"' in resp1.text.lower()
+            debug["init_screen"] = _describe_screen(resp1.text)
+            debug["init_error_msg"] = _extract_error(resp1.text)
+
+            try:
+                resp2 = await client.post(GRAPHQL_URL, json=self.payload_update(), headers=headers)
+            except Exception as exc:
+                msg = f"Update request error: {type(exc).__name__}: {exc}"
+                err(msg)
+                return False, msg, {**debug, "error": msg}
+
+            debug["update_http"] = resp2.status_code
+            debug["update_has_errors"] = '"errors"' in resp2.text.lower()
+            debug["update_screen"] = _describe_screen(resp2.text)
+            debug["update_error_msg"] = _extract_error(resp2.text)
+
+            ok_init = '"errors"' not in resp1.text.lower()
+            ok_update = resp2.status_code == 200 and '"errors"' not in resp2.text.lower()
+
+            if ok_init and ok_update:
                 msg = f"Trial activated for {self.email}"
                 ok(msg)
-                return True, msg
-            msg = f"Signup failed (HTTP {resp2.status_code}). " + resp2.text[:300]
+                return True, msg, debug
+            msg = f"Signup did not complete (init_ok={ok_init}, update_ok={ok_update})."
             err(msg)
-            return False, msg
+            return False, msg, debug
 
 
 # ---------------------------------------------------------------------------
 # Starlette App (ito ang gagamitin ng Wasmer deployment)
 # ---------------------------------------------------------------------------
 async def home(request):
-    return JSONResponse({"message": "API is running. Send a POST request to /process-trial"})
+    return JSONResponse({"message": "APIsa is running. Send a POST request to /process-trial"})
 
 
 async def process_trial(request):
@@ -209,8 +251,13 @@ async def process_trial(request):
 
     # Hindi na hinihingi ang bagong nfvdid at hindi na hinaharangan:
     # kahit hindi ma-detect ang DEFAULT_NFVDID/trial banner, diretsong mag-send ng signup.
-    success, message = await sender.send_signup()
-    return JSONResponse({"status": "success" if success else "failed", "email": email, "message": message})
+    success, message, debug = await sender.send_signup()
+    return JSONResponse({
+        "status": "success" if success else "failed",
+        "email": email,
+        "message": message,
+        "debug": debug,
+    })
 
 
 # CORS rules para payagan ang mga requests mula kahit saang website (gaya ng index.html)
