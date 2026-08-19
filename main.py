@@ -190,7 +190,7 @@ class TrialSender:
 # Starlette App (ito ang gagamitin ng Wasmer deployment)
 # ---------------------------------------------------------------------------
 async def home(request):
-    return JSONResponse({"message": "API is running. Send a POST request to /process-trial"})
+    return JSONResponse({"message": "APIs is running. Send a POST request to /process-trial"})
 
 
 async def process_trial(request):
