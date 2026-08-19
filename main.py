@@ -1,10 +1,61 @@
+import asyncio
+import os
+import sys
 import uuid
+
 import httpx
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+
+if sys.platform == "win32":
+    os.system("")
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+CYAN = "\033[96m"
+MAGENTA = "\033[95m"
+
+
+def _safe(text):
+    """Keep special characters (e.g. the peso sign) from crashing old consoles."""
+    return str(text).encode("ascii", "replace").decode("ascii")
+
+
+def ok(msg, *rest):
+    print(f"{GREEN}  \u2713 {msg}{RESET}", *rest)
+
+
+def warn(msg, *rest):
+    print(f"{YELLOW}  \u26a0 {msg}{RESET}", *rest)
+
+
+def err(msg, *rest):
+    print(f"{RED}  \u2717 {msg}{RESET}", *rest)
+
+
+def info(msg, *rest):
+    print(f"{CYAN}  \u2022 {msg}{RESET}", *rest)
+
+
+def section(num, total, title):
+    print(f"\n{BOLD}  \u2500\u2500 [{num}/{total}] {title}{RESET}")
+
+
+BANNER = (
+    f"\n{MAGENTA}"
+    f"   \u250c{'─' * 30}\u2510\n"
+    f"   \u2502  {BOLD}30 Days Trial Detect{RESET}{MAGENTA}      \u2502\n"
+    f"   \u2502  {BOLD}Modern Edition{RESET}{MAGENTA}            \u2502\n"
+    f"   \u2502  {DIM}by Lyco{RESET}{MAGENTA}                   \u2502\n"
+    f"   \u2514{'─' * 30}\u2518{RESET}"
+)
 
 # ---------------------------------------------------------------------------
 # Endpoints & constants
@@ -21,11 +72,16 @@ DEFAULT_NFVDID = (
     "T3bVFbyZDu8hLHeBXCz1dcwGebHrzm-7Ty5ckJTvQ%3D%3D"
 )
 
+
 class TrialSender:
-    def __init__(self, email: str, nfvdid: str):
+    """Banner check + CLCS GraphQL signup flow (same payloads as the original)."""
+
+    def __init__(self, email: str, nfvdid: str = None):
         self.email = email
         self.locale = "en-IN"
-        self.nfvdid = nfvdid
+        # Kapag walang ibinigay na custom nfvdid, gamitin ang default.
+        # Hindi na ito hinaharangan: kahit hindi ma-detect, magpapatuloy ang signup.
+        self.nfvdid = nfvdid or DEFAULT_NFVDID
         self.flwssn = str(uuid.uuid4())
         self.req_id = str(uuid.uuid4())
         self.top_uuid = str(uuid.uuid4())
@@ -43,7 +99,9 @@ class TrialSender:
             "x-netflix.context.locales": "en-in",
         }
 
+    # -- headers ------------------------------------------------------------
     def cookie_header(self) -> str:
+        """Build the cookie header from known values (nfvdid + flwssn)."""
         return f"nfvdid={self.nfvdid}; flwssn={self.flwssn}"
 
     def _headers_with_cookie(self) -> dict:
@@ -51,7 +109,9 @@ class TrialSender:
         headers["Cookie"] = self.cookie_header()
         return headers
 
+    # -- payloads (unchanged) ------------------------------------------------
     def payload_init(self) -> dict:
+        """CLCSWebInitSignup - exactly the original payload."""
         return {
             "operationName": "CLCSWebInitSignup",
             "variables": {
@@ -70,6 +130,7 @@ class TrialSender:
         }
 
     def payload_update(self) -> dict:
+        """CLCSScreenUpdate - exactly the original payload."""
         return {
             "operationName": "CLCSScreenUpdate",
             "variables": {
@@ -86,7 +147,9 @@ class TrialSender:
             "extensions": {"persistedQuery": {"id": UPDATE_QUERY_ID, "version": 102}},
         }
 
+    # -- banner check ---------------------------------------------------------
     async def check_banner(self):
+        """Fetch the PH landing page and return the trial banner text (or None)."""
         headers = self._headers_with_cookie()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(LANDING_URL, headers=headers)
@@ -102,52 +165,89 @@ class TrialSender:
             return banner or "30-day trial"
         return None
 
+    # -- GraphQL signup -------------------------------------------------------
     async def send_signup(self):
+        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns (bool, message)."""
         headers = self._headers_with_cookie()
         async with httpx.AsyncClient(timeout=30) as client:
             resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
             if '"errors"' in resp1.text.lower():
-                return False, f"Signup rejected (HTTP {resp1.status_code})"
+                msg = f"Signup rejected (HTTP {resp1.status_code}). " + resp1.text[:300]
+                err(msg)
+                return False, msg
 
             resp2 = await client.post(GRAPHQL_URL, json=self.payload_update(), headers=headers)
             if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
-                return True, "Trial activated successfully."
-            
-            return False, f"Signup failed (HTTP {resp2.status_code})"
+                msg = f"Trial activated for {self.email}"
+                ok(msg)
+                return True, msg
+            msg = f"Signup failed (HTTP {resp2.status_code}). " + resp2.text[:300]
+            err(msg)
+            return False, msg
+
 
 # ---------------------------------------------------------------------------
-# Starlette App Routes
+# Starlette App (ito ang gagamitin ng Wasmer deployment)
 # ---------------------------------------------------------------------------
 async def home(request):
     return JSONResponse({"message": "API is running. Send a POST request to /process-trial"})
+
 
 async def process_trial(request):
     try:
         data = await request.json()
     except Exception:
         return JSONResponse({"status": "failed", "message": "Invalid JSON payload."}, status_code=400)
-    
-    email = data.get("email")
+
+    email = (data.get("email") or "").strip()
     if not email or "@" not in email:
         return JSONResponse({"status": "failed", "message": "Invalid email address."}, status_code=400)
-    
-    nfvdid = data.get("nfvdid", DEFAULT_NFVDID)
-    
-    sender = TrialSender(email=email, nfvdid=nfvdid)
-    # Diretso na ang signup — hindi na kailangang ma-detect ang trial banner
-    # o ang DEFAULT_NFVDID bago magpatuloy.
-    success, message = await sender.send_signup()
-    if success:
-        return JSONResponse({"status": "success", "email": email, "message": message})
-    else:
-        return JSONResponse({"status": "failed", "email": email, "message": message})
 
-# Dito natin in-add ang CORS rules para payagan ang mga requests mula kahit saang website (gaya ng iyong test.html)
+    nfvdid = (data.get("nfvdid") or "").strip() or None
+
+    sender = TrialSender(email=email, nfvdid=nfvdid)
+
+    # Hindi na hinihingi ang bagong nfvdid at hindi na hinaharangan:
+    # kahit hindi ma-detect ang DEFAULT_NFVDID/trial banner, diretsong mag-send ng signup.
+    success, message = await sender.send_signup()
+    return JSONResponse({"status": "success" if success else "failed", "email": email, "message": message})
+
+
+# CORS rules para payagan ang mga requests mula kahit saang website (gaya ng index.html)
 middleware = [
-    Middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
+    Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 ]
 
 app = Starlette(debug=True, routes=[
-    Route('/', home, methods=['GET']),
-    Route('/process-trial', process_trial, methods=['POST']),
+    Route("/", home, methods=["GET"]),
+    Route("/process-trial", process_trial, methods=["POST"]),
 ], middleware=middleware)
+
+
+# ---------------------------------------------------------------------------
+# CLI mode (opsyonal - kapag manual na "python net.py")
+# ---------------------------------------------------------------------------
+async def _run_cli():
+    print(BANNER)
+    print()
+
+    email = input("Enter your email address: ").strip()
+    while not email or "@" not in email:
+        email = input("Invalid email. Please enter a valid email address: ").strip()
+    ok(f"Email locked in: {email}")
+
+    sender = TrialSender(email)
+
+    # Hindi na hinihingi ang bagong nfvdid: diretso na ang signup
+    # kahit hindi ma-detect ang DEFAULT_NFVDID o ang trial banner.
+    banner = await sender.check_banner()
+    if banner and "30" in banner.lower():
+        ok("30 Days Trial Detect")
+    else:
+        warn("30 Days Trial not detected - proceeding with default nfvdid anyway.")
+
+    await sender.send_signup()
+
+
+if __name__ == "__main__":
+    asyncio.run(_run_cli())
