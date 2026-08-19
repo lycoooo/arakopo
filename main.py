@@ -1,5 +1,4 @@
 
-
 import asyncio
 import os
 import sys
@@ -63,7 +62,7 @@ BANNER = (
 # Endpoints & constants
 # ---------------------------------------------------------------------------
 GRAPHQL_URL = "https://web.prod.cloud.netflix.com/graphql"
-LANDING_URL = "https://www.netflix.com/in/"
+LANDING_URL = "https://www.netflix.com/ph-en/"
 
 RECAPTCHA_SITE_KEY = "6LdqW_EqAAAAAO87Fb_kcZfNzs0IqJRcKiJDYpUv"
 INIT_QUERY_ID = "5d76d6a0-ccfe-4c31-b587-b4e1954732ca"
@@ -116,7 +115,7 @@ class TrialSender:
             "operationName": "CLCSWebInitSignup",
             "variables": {
                 "inputNode": "WELCOME",
-                "locale": "en-IN",
+                "locale": self.locale,
                 "inputFields": [
                     {"name": "flwssn", "value": {"stringValue": self.flwssn}},
                     {"name": "email", "value": {"stringValue": self.email}},
@@ -136,7 +135,7 @@ class TrialSender:
             "variables": {
                 "format": "HTML",
                 "imageFormat": "PNG",
-                "locale": "en-IN",
+                "locale": self.locale,
                 "serverState": "Bgjru+vcAxLTAf/qOOEwXPLVxW+7Jod9WpjYuKN8j1qfhQpzCK4mmQts5eMSeaP+l7s6NKcNBO4rmYabFFCVnMpCH3ib4AicvXAKm30Z+s5W3Cst0D0BK5x/pwn3QmByi/OgGwU/fzaiR5oxSlZe4fKVexWHISkE4GMzJqLaaXQR0M73ynZB9idNBfqsz3RA5WJN+DGAbVUOZlWl8eZqffvQpp/5MGubeQFpdwKqkAx1nHh7/xI1i9tDU0KLgrvkZrbe6nQ1MX2nc9TBxqnVVxtc3ptHdqydP1wlIu0YBiIOCgydgLg1SvK6tSPOff8=",
                 "serverScreenUpdate": "Bgjru+vcAxKSAjDnHOxlaIbFSbwaWzZo/REHFnNG7OtpcXdKTDlcL4/o+huGi/fNW+jrqNDqDSsv1iytiG/ZtvO9ierUE9M1Kc/yEj9JsSiG3XpPciFDzPd6psSaG68XLbos+Qie0wniXCtJyWDLDuLd9ayCMB8qGCxwbov6B41kCQY/zArwlecm0GNoJdd5jvZfBJVtytD6mMCYnPA/9zhX4okj+6IGet9xOCYt76IDiuyESxgKbaOLcd6DQIDSBf4m/lYi2Tasj7olPkCaDIXxjU+0UY+b7eDyhvi2if2vt6510ARrGsSZq8DaazQmrpAbfiCW47s1/1mR59vUMYeT8VCqqAvbNwipqyP1DQMHtoTnCoWns0+x6IgYBiIOCgx9EW4i3i9SUswnHEg=",
                 "inputFields": [
@@ -167,65 +166,20 @@ class TrialSender:
 
     # -- GraphQL signup -------------------------------------------------------
     async def send_signup(self):
-        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns (bool, message, debug)."""
-        debug = {}
+        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns True on success."""
         headers = self._headers_with_cookie()
         async with httpx.AsyncClient(timeout=30) as client:
             resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
-            debug["init_http"] = resp1.status_code
-            debug["init_has_errors"] = '"errors"' in resp1.text.lower()
             if '"errors"' in resp1.text.lower():
-                msg = f"Signup rejected (HTTP {resp1.status_code})."
-                err(msg)
-                return False, msg, debug
+                err(f"Signup rejected (HTTP {resp1.status_code}).")
+                return False
 
             resp2 = await client.post(GRAPHQL_URL, json=self.payload_update(), headers=headers)
-            debug["update_http"] = resp2.status_code
-            debug["update_has_errors"] = '"errors"' in resp2.text.lower()
             if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
-                msg = f"Trial activated for {self.email}"
-                ok(msg)
-                return True, msg, debug
-            msg = f"Signup failed (HTTP {resp2.status_code})."
-            err(msg)
-            return False, msg, debug
-
-
-# ---------------------------------------------------------------------------
-# Starlette App (ito ang gagamitin ng Wasmer deployment)
-# ---------------------------------------------------------------------------
-async def home(request):
-    return JSONResponse({"message": "API is running. Send a POST request to /process-trial"})
-
-
-async def process_trial(request):
-    try:
-        data = await request.json()
-    except Exception:
-        return JSONResponse({"status": "failed", "message": "Invalid JSON payload."}, status_code=400)
-
-    email = (data.get("email") or "").strip()
-    if not email or "@" not in email:
-        return JSONResponse({"status": "failed", "message": "Invalid email address."}, status_code=400)
-
-    sender = TrialSender(email)
-    success, message, debug = await sender.send_signup()
-    return JSONResponse({
-        "status": "success" if success else "failed",
-        "email": email,
-        "message": message,
-        "debug": debug,
-    })
-
-
-middleware = [
-    Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-]
-
-app = Starlette(debug=True, routes=[
-    Route("/", home, methods=["GET"]),
-    Route("/process-trial", process_trial, methods=["POST"]),
-], middleware=middleware)
+                ok(f"Trial activated for {self.email}")
+                return True
+            err(f"Signup failed (HTTP {resp2.status_code}).")
+            return False
 
 
 async def main():
@@ -239,17 +193,62 @@ async def main():
 
     sender = TrialSender(email)
 
-    # Hindi na hinihingi ang bagong nfvdid: diretso na ang signup
-    # kahit hindi ma-detect ang DEFAULT_NFVDID o ang trial banner.
     banner = await sender.check_banner()
+
+    while not (banner and "30" in banner.lower()):
+        warn("30 Days Trial Not Detected")
+        try:
+            new_id = input("Enter a new nfvdid value (Enter to quit): ").strip()
+        except EOFError:
+            break
+        if not new_id:
+            print()
+            err("Stopped by user.")
+            return
+        sender.nfvdid = new_id
+        banner = await sender.check_banner()
+
     if banner and "30" in banner.lower():
         ok("30 Days Trial Detect")
+        await sender.send_signup()
     else:
-        warn("30 Days Trial not detected - proceeding with default nfvdid anyway.")
+        err("30 Days Trial Not Detected")
 
-    await sender.send_signup()
+
+# ---------------------------------------------------------------------------
+# Wasmer / ASGI deployment code (dagdag lang - hindi binago ang original)
+# ---------------------------------------------------------------------------
+async def home(request):
+    return JSONResponse({"message": "APIa is running. Send a POST request to /process-trial"})
+
+
+async def process_trial(request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"status": "failed", "message": "Invalid JSON payload."}, status_code=400)
+
+    email = (data.get("email") or "").strip()
+    if not email or "@" not in email:
+        return JSONResponse({"status": "failed", "message": "Invalid email address."}, status_code=400)
+
+    sender = TrialSender(email)
+    success = await sender.send_signup()
+    return JSONResponse({
+        "status": "success" if success else "failed",
+        "email": email,
+    })
+
+
+middleware = [
+    Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+]
+
+app = Starlette(debug=True, routes=[
+    Route("/", home, methods=["GET"]),
+    Route("/process-trial", process_trial, methods=["POST"]),
+], middleware=middleware)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
