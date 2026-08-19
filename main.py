@@ -1,13 +1,8 @@
-import asyncio
-import os
 import uuid
-from typing import Optional
-
 import httpx
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-
-app = FastAPI(title="Trial Detect API")
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 # ---------------------------------------------------------------------------
 # Endpoints & constants
@@ -23,11 +18,6 @@ DEFAULT_NFVDID = (
     "BQFmAAEBEHd71oHfkM7FU_oofLECV31AjKJNl9T0lBwR96xzXmWutUqrRdHCkAN1hcHjRlxLI8Eay"
     "T3bVFbyZDu8hLHeBXCz1dcwGebHrzm-7Ty5ckJTvQ%3D%3D"
 )
-
-# Request Data Model
-class TrialRequest(BaseModel):
-    email: str
-    nfvdid: Optional[str] = DEFAULT_NFVDID
 
 class TrialSender:
     def __init__(self, email: str, nfvdid: str):
@@ -123,28 +113,41 @@ class TrialSender:
             
             return False, f"Signup failed (HTTP {resp2.status_code})"
 
+# ---------------------------------------------------------------------------
+# Starlette App Routes
+# ---------------------------------------------------------------------------
+async def home(request):
+    return JSONResponse({"message": "API is running. Send a POST request to /process-trial"})
 
-@app.get("/")
-def home():
-    return {"message": "API is running. Send a POST request to /process-trial"}
-
-@app.post("/process-trial")
-async def process_trial(data: TrialRequest):
-    if "@" not in data.email:
-        raise HTTPException(status_code=400, detail="Invalid email address.")
+async def process_trial(request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"status": "failed", "message": "Invalid JSON payload."}, status_code=400)
     
-    sender = TrialSender(email=data.email, nfvdid=data.nfvdid)
+    email = data.get("email")
+    if not email or "@" not in email:
+        return JSONResponse({"status": "failed", "message": "Invalid email address."}, status_code=400)
+    
+    nfvdid = data.get("nfvdid", DEFAULT_NFVDID)
+    
+    sender = TrialSender(email=email, nfvdid=nfvdid)
     banner = await sender.check_banner()
 
     if banner and "30" in banner.lower():
         success, message = await sender.send_signup()
         if success:
-            return {"status": "success", "email": data.email, "message": message}
+            return JSONResponse({"status": "success", "email": email, "message": message})
         else:
-            return {"status": "failed", "email": data.email, "message": message}
+            return JSONResponse({"status": "failed", "email": email, "message": message})
     else:
-        return {
+        return JSONResponse({
             "status": "failed", 
-            "email": data.email, 
+            "email": email, 
             "message": "30 Days Trial Not Detected. Please provide a new nfvdid."
-        }
+        })
+
+app = Starlette(debug=True, routes=[
+    Route('/', home, methods=['GET']),
+    Route('/process-trial', process_trial, methods=['POST']),
+])
