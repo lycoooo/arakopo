@@ -1,4 +1,5 @@
 
+
 import asyncio
 import os
 import sys
@@ -216,10 +217,10 @@ async def main():
 
 
 # ---------------------------------------------------------------------------
-# Wasmer / ASGI deployment code (dagdag lang - hindi binago ang original)
+# Wasmer / ASGI deployment code (DAGDAG LANG - hindi binago ang original)
 # ---------------------------------------------------------------------------
 async def home(request):
-    return JSONResponse({"message": "APIa is running. Send a POST request to /process-trial"})
+    return JSONResponse({"message": "API is running. Send a POST request to /process-trial"})
 
 
 async def process_trial(request):
@@ -252,3 +253,4 @@ app = Starlette(debug=True, routes=[
 
 if __name__ == "__main__":
     asyncio.run(main())
+
