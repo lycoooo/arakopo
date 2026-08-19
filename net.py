@@ -1,58 +1,13 @@
-
-
 import asyncio
 import os
-import sys
 import uuid
+from typing import Optional
 
 import httpx
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-if sys.platform == "win32":
-    os.system("")
-
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-CYAN = "\033[96m"
-MAGENTA = "\033[95m"
-
-
-def _safe(text):
-    """Keep special characters (e.g. the peso sign) from crashing old consoles."""
-    return str(text).encode("ascii", "replace").decode("ascii")
-
-
-def ok(msg, *rest):
-    print(f"{GREEN}  \u2713 {msg}{RESET}", *rest)
-
-
-def warn(msg, *rest):
-    print(f"{YELLOW}  \u26a0 {msg}{RESET}", *rest)
-
-
-def err(msg, *rest):
-    print(f"{RED}  \u2717 {msg}{RESET}", *rest)
-
-
-def info(msg, *rest):
-    print(f"{CYAN}  \u2022 {msg}{RESET}", *rest)
-
-
-def section(num, total, title):
-    print(f"\n{BOLD}  \u2500\u2500 [{num}/{total}] {title}{RESET}")
-
-
-BANNER = (
-    f"\n{MAGENTA}"
-    f"   \u250c{'─' * 30}\u2510\n"
-    f"   \u2502  {BOLD}30 Days Trial Detect{RESET}{MAGENTA}      \u2502\n"
-    f"   \u2502  {BOLD}Modern Edition{RESET}{MAGENTA}            \u2502\n"
-    f"   \u2502  {DIM}by Lyco{RESET}{MAGENTA}                   \u2502\n"
-    f"   \u2514{'─' * 30}\u2518{RESET}"
-)
+app = FastAPI(title="Trial Detect API")
 
 # ---------------------------------------------------------------------------
 # Endpoints & constants
@@ -69,13 +24,16 @@ DEFAULT_NFVDID = (
     "T3bVFbyZDu8hLHeBXCz1dcwGebHrzm-7Ty5ckJTvQ%3D%3D"
 )
 
+# Request Data Model
+class TrialRequest(BaseModel):
+    email: str
+    nfvdid: Optional[str] = DEFAULT_NFVDID
 
 class TrialSender:
-
-    def __init__(self, email: str):
+    def __init__(self, email: str, nfvdid: str):
         self.email = email
         self.locale = "en-IN"
-        self.nfvdid = DEFAULT_NFVDID
+        self.nfvdid = nfvdid
         self.flwssn = str(uuid.uuid4())
         self.req_id = str(uuid.uuid4())
         self.top_uuid = str(uuid.uuid4())
@@ -93,9 +51,7 @@ class TrialSender:
             "x-netflix.context.locales": "en-in",
         }
 
-    # -- headers ------------------------------------------------------------
     def cookie_header(self) -> str:
-        """Build the cookie header from known values (nfvdid + flwssn)."""
         return f"nfvdid={self.nfvdid}; flwssn={self.flwssn}"
 
     def _headers_with_cookie(self) -> dict:
@@ -103,9 +59,7 @@ class TrialSender:
         headers["Cookie"] = self.cookie_header()
         return headers
 
-    # -- payloads (unchanged) ------------------------------------------------
     def payload_init(self) -> dict:
-        """CLCSWebInitSignup - exactly the original payload."""
         return {
             "operationName": "CLCSWebInitSignup",
             "variables": {
@@ -124,7 +78,6 @@ class TrialSender:
         }
 
     def payload_update(self) -> dict:
-        """CLCSScreenUpdate - exactly the original payload."""
         return {
             "operationName": "CLCSScreenUpdate",
             "variables": {
@@ -141,9 +94,7 @@ class TrialSender:
             "extensions": {"persistedQuery": {"id": UPDATE_QUERY_ID, "version": 102}},
         }
 
-    # -- banner check ---------------------------------------------------------
     async def check_banner(self):
-        """Fetch the PH landing page and return the trial banner text (or None)."""
         headers = self._headers_with_cookie()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(LANDING_URL, headers=headers)
@@ -159,57 +110,41 @@ class TrialSender:
             return banner or "30-day trial"
         return None
 
-    # -- GraphQL signup -------------------------------------------------------
     async def send_signup(self):
-        """Run CLCSWebInitSignup + CLCSScreenUpdate. Returns True on success."""
         headers = self._headers_with_cookie()
         async with httpx.AsyncClient(timeout=30) as client:
             resp1 = await client.post(GRAPHQL_URL, json=self.payload_init(), headers=headers)
             if '"errors"' in resp1.text.lower():
-                err(f"Signup rejected (HTTP {resp1.status_code}).")
-                return False
+                return False, f"Signup rejected (HTTP {resp1.status_code})"
 
             resp2 = await client.post(GRAPHQL_URL, json=self.payload_update(), headers=headers)
             if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
-                ok(f"Trial activated for {self.email}")
-                return True
-            err(f"Signup failed (HTTP {resp2.status_code}).")
-            return False
+                return True, "Trial activated successfully."
+            
+            return False, f"Signup failed (HTTP {resp2.status_code})"
 
 
-async def main():
-    print(BANNER)
-    print()
+@app.get("/")
+def home():
+    return {"message": "API is running. Send a POST request to /process-trial"}
 
-    email = input("Enter your email address: ").strip()
-    while not email or "@" not in email:
-        email = input("Invalid email. Please enter a valid email address: ").strip()
-    ok(f"Email locked in: {email}")
-
-    sender = TrialSender(email)
-
+@app.post("/process-trial")
+async def process_trial(data: TrialRequest):
+    if "@" not in data.email:
+        raise HTTPException(status_code=400, detail="Invalid email address.")
+    
+    sender = TrialSender(email=data.email, nfvdid=data.nfvdid)
     banner = await sender.check_banner()
 
-    while not (banner and "30" in banner.lower()):
-        warn("30 Days Trial Not Detected")
-        try:
-            new_id = input("Enter a new nfvdid value (Enter to quit): ").strip()
-        except EOFError:
-            break
-        if not new_id:
-            print()
-            err("Stopped by user.")
-            return
-        sender.nfvdid = new_id
-        banner = await sender.check_banner()
-
     if banner and "30" in banner.lower():
-        ok("30 Days Trial Detect")
-        await sender.send_signup()
+        success, message = await sender.send_signup()
+        if success:
+            return {"status": "success", "email": data.email, "message": message}
+        else:
+            return {"status": "failed", "email": data.email, "message": message}
     else:
-        err("30 Days Trial Not Detected")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
+        return {
+            "status": "failed", 
+            "email": data.email, 
+            "message": "30 Days Trial Not Detected. Please provide a new nfvdid."
+        }
